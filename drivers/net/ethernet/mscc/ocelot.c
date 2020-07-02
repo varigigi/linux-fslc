@@ -2538,8 +2538,7 @@ void ocelot_deinit(struct ocelot *ocelot)
 	if (ocelot->ptp)
 		ocelot_ace_rule_offload_del(&ptp_rule);
 	ocelot_ace_deinit();
-	if (ocelot->ptp_clock)
-		ptp_clock_unregister(ocelot->ptp_clock);
+	ocelot_deinit_timestamp(ocelot);
 
 	for (i = 0; i < ocelot->num_phys_ports; i++) {
 		port = ocelot->ports[i];
