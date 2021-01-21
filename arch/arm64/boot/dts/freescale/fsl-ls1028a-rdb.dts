@@ -98,6 +98,10 @@
 	status = "okay";
 };
 
+&ftm_alarm1 {
+	status = "okay";
+};
+
 &usb1 {
 	dr_mode = "otg";
 };
@@ -261,6 +265,10 @@
 		phy-mode = "qsgmii";
 		managed = "in-band-status";
 	};
+};
+
+&pwm0 {
+	status = "okay";
 };
 
 &sai4 {

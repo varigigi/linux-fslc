@@ -65,7 +65,9 @@
 #define PCI_ENDPOINT_TEST_IRQ_NUMBER		0x28
 
 #define PCI_DEVICE_ID_TI_AM654			0xb00c
+#define PCI_DEVICE_ID_LS1088A			0x80c0
 #define PCI_DEVICE_ID_LX2160A			0x8d80
+#define PCI_DEVICE_ID_LX2162A			0x8d88
 
 #define is_am654_pci_dev(pdev)		\
 		((pdev)->device == PCI_DEVICE_ID_TI_AM654)
@@ -691,9 +693,6 @@ static int pci_endpoint_test_probe(struct pci_dev *pdev,
 	if (!pci_endpoint_test_alloc_irq_vectors(test, irq_type))
 		goto err_disable_irq;
 
-	if (!pci_endpoint_test_request_irq(test))
-		goto err_disable_irq;
-
 	for (bar = BAR_0; bar <= BAR_5; bar++) {
 		if (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) {
 			base = pci_ioremap_bar(pdev, bar);
@@ -722,13 +721,16 @@ static int pci_endpoint_test_probe(struct pci_dev *pdev,
 		goto err_iounmap;
 	}
 
+	if (!pci_endpoint_test_request_irq(test))
+		goto err_ida_remove;
+
 	snprintf(name, sizeof(name), DRV_MODULE_NAME ".%d", id);
 	misc_device = &test->miscdev;
 	misc_device->minor = MISC_DYNAMIC_MINOR;
 	misc_device->name = kstrdup(name, GFP_KERNEL);
 	if (!misc_device->name) {
 		err = -ENOMEM;
-		goto err_ida_remove;
+		goto err_release_irq;
 	}
 	misc_device->fops = &pci_endpoint_test_fops,
 
@@ -743,6 +745,9 @@ static int pci_endpoint_test_probe(struct pci_dev *pdev,
 err_kfree_name:
 	kfree(misc_device->name);
 
+err_release_irq:
+	pci_endpoint_test_release_irq(test);
+
 err_ida_remove:
 	ida_simple_remove(&pci_endpoint_test_ida, id);
 
@@ -751,7 +756,6 @@ err_iounmap:
 		if (test->bar[bar])
 			pci_iounmap(pdev, test->bar[bar]);
 	}
-	pci_endpoint_test_release_irq(test);
 
 err_disable_irq:
 	pci_endpoint_test_free_irq_vectors(test);
@@ -800,7 +804,9 @@ static const struct pci_device_id pci_endpoint_test_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_DRA74x) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_DRA72x) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_FREESCALE, 0x81c0) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_FREESCALE, PCI_DEVICE_ID_LS1088A) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_FREESCALE, PCI_DEVICE_ID_LX2160A) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_FREESCALE, PCI_DEVICE_ID_LX2162A) },
 	{ PCI_DEVICE_DATA(SYNOPSYS, EDDA, NULL) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_AM654),
 	  .driver_data = (kernel_ulong_t)&am654_data

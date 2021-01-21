@@ -11,6 +11,7 @@
 #include <linux/if_vlan.h>
 #include <linux/phy.h>
 #include <net/tsn.h>
+#include <linux/dim.h>
 
 #include "enetc_hw.h"
 
@@ -47,8 +48,9 @@ struct enetc_ring_stats {
 	unsigned int win_drop;
 };
 
-#define ENETC_BDR_DEFAULT_SIZE	1024
-#define ENETC_DEFAULT_TX_WORK	256
+#define ENETC_RX_RING_DEFAULT_SIZE	512
+#define ENETC_TX_RING_DEFAULT_SIZE	256
+#define ENETC_DEFAULT_TX_WORK		(ENETC_TX_RING_DEFAULT_SIZE / 2)
 
 struct enetc_bdr {
 	struct device *dev; /* for DMA mapping */
@@ -75,6 +77,7 @@ struct enetc_bdr {
 	struct enetc_ring_stats stats;
 
 	dma_addr_t bd_dma_base;
+	bool ext_en; /* enable h/w descriptor extensions */
 } ____cacheline_aligned_in_smp;
 
 static inline void enetc_bdr_idx_inc(struct enetc_bdr *bdr, int *i)
@@ -106,7 +109,37 @@ struct enetc_cbdr {
 };
 
 #define ENETC_TXBD(BDR, i) (&(((union enetc_tx_bd *)((BDR).bd_base))[i]))
-#define ENETC_RXBD(BDR, i) (&(((union enetc_rx_bd *)((BDR).bd_base))[i]))
+
+static inline union enetc_rx_bd *enetc_rxbd(struct enetc_bdr *rx_ring, int i)
+{
+	int hw_idx = i;
+
+#ifdef CONFIG_FSL_ENETC_PTP_CLOCK
+	if (rx_ring->ext_en)
+		hw_idx = 2 * i;
+#endif
+	return &(((union enetc_rx_bd *)rx_ring->bd_base)[hw_idx]);
+}
+
+static inline union enetc_rx_bd *enetc_rxbd_next(struct enetc_bdr *rx_ring,
+						 union enetc_rx_bd *rxbd,
+						 int i)
+{
+	rxbd++;
+#ifdef CONFIG_FSL_ENETC_PTP_CLOCK
+	if (rx_ring->ext_en)
+		rxbd++;
+#endif
+	if (unlikely(++i == rx_ring->bd_count))
+		rxbd = rx_ring->bd_base;
+
+	return rxbd;
+}
+
+static inline union enetc_rx_bd *enetc_rxbd_ext(union enetc_rx_bd *rxbd)
+{
+	return ++rxbd;
+}
 
 struct enetc_msg_swbd {
 	void *vaddr;
@@ -138,9 +171,8 @@ struct enetc_cbs {
 
 #define ENETC_REV1	0x1
 enum enetc_errata {
-	ENETC_ERR_TXCSUM	= BIT(0),
-	ENETC_ERR_VLAN_ISOL	= BIT(1),
-	ENETC_ERR_UCMCSWP	= BIT(2),
+	ENETC_ERR_VLAN_ISOL	= BIT(0),
+	ENETC_ERR_UCMCSWP	= BIT(1),
 };
 
 #define ENETC_SI_F_QBV BIT(0)
@@ -186,14 +218,19 @@ static inline bool enetc_si_is_pf(struct enetc_si *si)
 struct enetc_int_vector {
 	void __iomem *rbier;
 	void __iomem *tbier_base;
+	void __iomem *ricr1;
 	unsigned long tx_rings_map;
 	int count_tx_rings;
-	struct napi_struct napi;
+	u32 rx_ictt;
+	u16 comp_cnt;
+	bool rx_dim_en, rx_napi_work;
+	struct napi_struct napi ____cacheline_aligned_in_smp;
+	struct dim rx_dim ____cacheline_aligned_in_smp;
 	char name[ENETC_INT_NAME_MAX];
 
-	struct enetc_bdr rx_ring ____cacheline_aligned_in_smp;
-	struct enetc_bdr tx_ring[0];
-};
+	struct enetc_bdr rx_ring;
+	struct enetc_bdr tx_ring[];
+} ____cacheline_aligned_in_smp;
 
 struct enetc_cls_rule {
 	struct ethtool_rx_flow_spec fs;
@@ -209,6 +246,21 @@ enum enetc_active_offloads {
 	ENETC_F_QBV             = BIT(2),
 	ENETC_F_QBU             = BIT(3),
 };
+
+/* interrupt coalescing modes */
+enum enetc_ic_mode {
+	/* one interrupt per frame */
+	ENETC_IC_NONE = 0,
+	/* activated when int coalescing time is set to a non-0 value */
+	ENETC_IC_RX_MANUAL = BIT(0),
+	ENETC_IC_TX_MANUAL = BIT(1),
+	/* use dynamic interrupt moderation */
+	ENETC_IC_RX_ADAPTIVE = BIT(2),
+};
+
+#define ENETC_RXIC_PKTTHR	min_t(u32, 256, ENETC_RX_RING_DEFAULT_SIZE / 2)
+#define ENETC_TXIC_PKTTHR	min_t(u32, 128, ENETC_TX_RING_DEFAULT_SIZE / 2)
+#define ENETC_TXIC_TIMETHR	enetc_usecs_to_cycles(600)
 
 struct enetc_ndev_priv {
 	struct net_device *ndev;
@@ -232,6 +284,8 @@ struct enetc_ndev_priv {
 
 	struct device_node *phy_node;
 	phy_interface_t if_mode;
+	int ic_mode;
+	u32 tx_ictt;
 };
 
 /* Messaging */
@@ -261,6 +315,8 @@ void enetc_free_si_resources(struct enetc_ndev_priv *priv);
 
 int enetc_open(struct net_device *ndev);
 int enetc_close(struct net_device *ndev);
+void enetc_start(struct net_device *ndev);
+void enetc_stop(struct net_device *ndev);
 netdev_tx_t enetc_xmit(struct sk_buff *skb, struct net_device *ndev);
 struct net_device_stats *enetc_get_stats(struct net_device *ndev);
 int enetc_set_features(struct net_device *ndev,
@@ -289,7 +345,12 @@ void enetc_sched_speed_set(struct net_device *ndev);
 int enetc_setup_tc_cbs(struct net_device *ndev, void *type_data);
 #else
 #define enetc_setup_tc_taprio(ndev, type_data) -EOPNOTSUPP
+#ifdef CONFIG_ENETC_TSN
+void enetc_pspeed_set(struct net_device *ndev);
+#define enetc_sched_speed_set(ndev) enetc_pspeed_set(ndev)
+#else
 #define enetc_sched_speed_set(ndev) (void)0
+#endif
 #define enetc_setup_tc_cbs(ndev, type_data) -EOPNOTSUPP
 #endif
 #ifdef CONFIG_ENETC_TSN

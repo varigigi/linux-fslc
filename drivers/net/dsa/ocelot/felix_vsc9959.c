@@ -3,11 +3,16 @@
  * Copyright 2018-2019 NXP Semiconductors
  */
 #include <linux/fsl/enetc_mdio.h>
+#include <soc/mscc/ocelot_vcap.h>
 #include <soc/mscc/ocelot_sys.h>
 #include <soc/mscc/ocelot.h>
 #include <linux/iopoll.h>
 #include <linux/pci.h>
 #include "felix.h"
+
+#define VSC9959_VCAP_IS2_CNT		1024
+#define VSC9959_VCAP_IS2_ENTRY_WIDTH	376
+#define VSC9959_VCAP_PORT_CNT		6
 
 /* TODO: should find a better place for these */
 #define USXGMII_BMCR_RESET		BIT(15)
@@ -308,6 +313,8 @@ static const u32 vsc9959_ptp_regmap[] = {
 	REG(PTP_PIN_TOD_SEC_MSB,           0x000004),
 	REG(PTP_PIN_TOD_SEC_LSB,           0x000008),
 	REG(PTP_PIN_TOD_NSEC,              0x00000c),
+	REG(PTP_PIN_WF_HIGH_PERIOD,        0x000014),
+	REG(PTP_PIN_WF_LOW_PERIOD,         0x000018),
 	REG(PTP_CFG_MISC,                  0x0000a0),
 	REG(PTP_CLK_CFG_ADJ_CFG,           0x0000a4),
 	REG(PTP_CLK_CFG_ADJ_FREQ,          0x0000a8),
@@ -332,10 +339,8 @@ static const u32 *vsc9959_regmap[] = {
 	[GCB]	= vsc9959_gcb_regmap,
 };
 
-/* Addresses are relative to the PCI device's base address and
- * will be fixed up at ioremap time.
- */
-static struct resource vsc9959_target_io_res[] = {
+/* Addresses are relative to the PCI device's base address */
+static const struct resource vsc9959_target_io_res[] = {
 	[ANA] = {
 		.start	= 0x0280000,
 		.end	= 0x028ffff,
@@ -378,7 +383,7 @@ static struct resource vsc9959_target_io_res[] = {
 	},
 };
 
-static struct resource vsc9959_port_io_res[] = {
+static const struct resource vsc9959_port_io_res[] = {
 	{
 		.start	= 0x0100000,
 		.end	= 0x010ffff,
@@ -414,7 +419,7 @@ static struct resource vsc9959_port_io_res[] = {
 /* Port MAC 0 Internal MDIO bus through which the SerDes acting as an
  * SGMII/QSGMII MAC PCS can be found.
  */
-static struct resource vsc9959_imdio_res = {
+static const struct resource vsc9959_imdio_res = {
 	.start		= 0x8030,
 	.end		= 0x8040,
 	.name		= "imdio",
@@ -551,6 +556,129 @@ static const struct ocelot_stat_layout vsc9959_stats_layout[] = {
 	{ .offset = 0x111,	.name = "drop_green_prio_7", },
 };
 
+struct vcap_field vsc9959_vcap_is2_keys[] = {
+	/* Common: 41 bits */
+	[VCAP_IS2_TYPE]				= {  0,   4},
+	[VCAP_IS2_HK_FIRST]			= {  4,   1},
+	[VCAP_IS2_HK_PAG]			= {  5,   8},
+	[VCAP_IS2_HK_IGR_PORT_MASK]		= { 13,   7},
+	[VCAP_IS2_HK_RSV2]			= { 20,   1},
+	[VCAP_IS2_HK_HOST_MATCH]		= { 21,   1},
+	[VCAP_IS2_HK_L2_MC]			= { 22,   1},
+	[VCAP_IS2_HK_L2_BC]			= { 23,   1},
+	[VCAP_IS2_HK_VLAN_TAGGED]		= { 24,   1},
+	[VCAP_IS2_HK_VID]			= { 25,  12},
+	[VCAP_IS2_HK_DEI]			= { 37,   1},
+	[VCAP_IS2_HK_PCP]			= { 38,   3},
+	/* MAC_ETYPE / MAC_LLC / MAC_SNAP / OAM common */
+	[VCAP_IS2_HK_L2_DMAC]			= { 41,  48},
+	[VCAP_IS2_HK_L2_SMAC]			= { 89,  48},
+	/* MAC_ETYPE (TYPE=000) */
+	[VCAP_IS2_HK_MAC_ETYPE_ETYPE]		= {137,  16},
+	[VCAP_IS2_HK_MAC_ETYPE_L2_PAYLOAD0]	= {153,  16},
+	[VCAP_IS2_HK_MAC_ETYPE_L2_PAYLOAD1]	= {169,   8},
+	[VCAP_IS2_HK_MAC_ETYPE_L2_PAYLOAD2]	= {177,   3},
+	/* MAC_LLC (TYPE=001) */
+	[VCAP_IS2_HK_MAC_LLC_L2_LLC]		= {137,  40},
+	/* MAC_SNAP (TYPE=010) */
+	[VCAP_IS2_HK_MAC_SNAP_L2_SNAP]		= {137,  40},
+	/* MAC_ARP (TYPE=011) */
+	[VCAP_IS2_HK_MAC_ARP_SMAC]		= { 41,  48},
+	[VCAP_IS2_HK_MAC_ARP_ADDR_SPACE_OK]	= { 89,   1},
+	[VCAP_IS2_HK_MAC_ARP_PROTO_SPACE_OK]	= { 90,   1},
+	[VCAP_IS2_HK_MAC_ARP_LEN_OK]		= { 91,   1},
+	[VCAP_IS2_HK_MAC_ARP_TARGET_MATCH]	= { 92,   1},
+	[VCAP_IS2_HK_MAC_ARP_SENDER_MATCH]	= { 93,   1},
+	[VCAP_IS2_HK_MAC_ARP_OPCODE_UNKNOWN]	= { 94,   1},
+	[VCAP_IS2_HK_MAC_ARP_OPCODE]		= { 95,   2},
+	[VCAP_IS2_HK_MAC_ARP_L3_IP4_DIP]	= { 97,  32},
+	[VCAP_IS2_HK_MAC_ARP_L3_IP4_SIP]	= {129,  32},
+	[VCAP_IS2_HK_MAC_ARP_DIP_EQ_SIP]	= {161,   1},
+	/* IP4_TCP_UDP / IP4_OTHER common */
+	[VCAP_IS2_HK_IP4]			= { 41,   1},
+	[VCAP_IS2_HK_L3_FRAGMENT]		= { 42,   1},
+	[VCAP_IS2_HK_L3_FRAG_OFS_GT0]		= { 43,   1},
+	[VCAP_IS2_HK_L3_OPTIONS]		= { 44,   1},
+	[VCAP_IS2_HK_IP4_L3_TTL_GT0]		= { 45,   1},
+	[VCAP_IS2_HK_L3_TOS]			= { 46,   8},
+	[VCAP_IS2_HK_L3_IP4_DIP]		= { 54,  32},
+	[VCAP_IS2_HK_L3_IP4_SIP]		= { 86,  32},
+	[VCAP_IS2_HK_DIP_EQ_SIP]		= {118,   1},
+	/* IP4_TCP_UDP (TYPE=100) */
+	[VCAP_IS2_HK_TCP]			= {119,   1},
+	[VCAP_IS2_HK_L4_DPORT]			= {120,  16},
+	[VCAP_IS2_HK_L4_SPORT]			= {136,  16},
+	[VCAP_IS2_HK_L4_RNG]			= {152,   8},
+	[VCAP_IS2_HK_L4_SPORT_EQ_DPORT]		= {160,   1},
+	[VCAP_IS2_HK_L4_SEQUENCE_EQ0]		= {161,   1},
+	[VCAP_IS2_HK_L4_FIN]			= {162,   1},
+	[VCAP_IS2_HK_L4_SYN]			= {163,   1},
+	[VCAP_IS2_HK_L4_RST]			= {164,   1},
+	[VCAP_IS2_HK_L4_PSH]			= {165,   1},
+	[VCAP_IS2_HK_L4_ACK]			= {166,   1},
+	[VCAP_IS2_HK_L4_URG]			= {167,   1},
+	[VCAP_IS2_HK_L4_1588_DOM]		= {168,   8},
+	[VCAP_IS2_HK_L4_1588_VER]		= {176,   4},
+	/* IP4_OTHER (TYPE=101) */
+	[VCAP_IS2_HK_IP4_L3_PROTO]		= {119,   8},
+	[VCAP_IS2_HK_L3_PAYLOAD]		= {127,  56},
+	/* IP6_STD (TYPE=110) */
+	[VCAP_IS2_HK_IP6_L3_TTL_GT0]		= { 41,   1},
+	[VCAP_IS2_HK_L3_IP6_SIP]		= { 42, 128},
+	[VCAP_IS2_HK_IP6_L3_PROTO]		= {170,   8},
+	/* OAM (TYPE=111) */
+	[VCAP_IS2_HK_OAM_MEL_FLAGS]		= {137,   7},
+	[VCAP_IS2_HK_OAM_VER]			= {144,   5},
+	[VCAP_IS2_HK_OAM_OPCODE]		= {149,   8},
+	[VCAP_IS2_HK_OAM_FLAGS]			= {157,   8},
+	[VCAP_IS2_HK_OAM_MEPID]			= {165,  16},
+	[VCAP_IS2_HK_OAM_CCM_CNTS_EQ0]		= {181,   1},
+	[VCAP_IS2_HK_OAM_IS_Y1731]		= {182,   1},
+};
+
+struct vcap_field vsc9959_vcap_is2_actions[] = {
+	[VCAP_IS2_ACT_HIT_ME_ONCE]		= {  0,  1},
+	[VCAP_IS2_ACT_CPU_COPY_ENA]		= {  1,  1},
+	[VCAP_IS2_ACT_CPU_QU_NUM]		= {  2,  3},
+	[VCAP_IS2_ACT_MASK_MODE]		= {  5,  2},
+	[VCAP_IS2_ACT_MIRROR_ENA]		= {  7,  1},
+	[VCAP_IS2_ACT_LRN_DIS]			= {  8,  1},
+	[VCAP_IS2_ACT_POLICE_ENA]		= {  9,  1},
+	[VCAP_IS2_ACT_POLICE_IDX]		= { 10,  9},
+	[VCAP_IS2_ACT_POLICE_VCAP_ONLY]		= { 19,  1},
+	[VCAP_IS2_ACT_PORT_MASK]		= { 20, 11},
+	[VCAP_IS2_ACT_REW_OP]			= { 31,  9},
+	[VCAP_IS2_ACT_SMAC_REPLACE_ENA]		= { 40,  1},
+	[VCAP_IS2_ACT_RSV]			= { 41,  2},
+	[VCAP_IS2_ACT_ACL_ID]			= { 43,  6},
+	[VCAP_IS2_ACT_HIT_CNT]			= { 49, 32},
+};
+
+static const struct vcap_props vsc9959_vcap_props[] = {
+	[VCAP_IS2] = {
+		.tg_width = 2,
+		.sw_count = 4,
+		.entry_count = VSC9959_VCAP_IS2_CNT,
+		.entry_width = VSC9959_VCAP_IS2_ENTRY_WIDTH,
+		.action_count = VSC9959_VCAP_IS2_CNT +
+				VSC9959_VCAP_PORT_CNT + 2,
+		.action_width = 89,
+		.action_type_width = 1,
+		.action_table = {
+			[IS2_ACTION_TYPE_NORMAL] = {
+				.width = 44,
+				.count = 2
+			},
+			[IS2_ACTION_TYPE_SMAC_SIP] = {
+				.width = 6,
+				.count = 4
+			},
+		},
+		.counter_words = 4,
+		.counter_width = 32,
+	},
+};
+
 #define VSC9959_INIT_TIMEOUT			50000
 #define VSC9959_GCB_RST_SLEEP			100
 #define VSC9959_SYS_RAMINIT_SLEEP		80
@@ -599,42 +727,6 @@ static int vsc9959_reset(struct ocelot *ocelot)
 	return 0;
 }
 
-static void vsc9959_pcs_an_restart_sgmii(struct phy_device *pcs)
-{
-	phy_set_bits(pcs, MII_BMCR, BMCR_ANRESTART);
-}
-
-static void vsc9959_pcs_an_restart_usxgmii(struct phy_device *pcs)
-{
-	phy_write_mmd(pcs, MDIO_MMD_VEND2, MII_BMCR,
-		      USXGMII_BMCR_RESET |
-		      USXGMII_BMCR_AN_EN |
-		      USXGMII_BMCR_RST_AN);
-}
-
-static void vsc9959_pcs_an_restart(struct ocelot *ocelot, int port)
-{
-	struct felix *felix = ocelot_to_felix(ocelot);
-	struct phy_device *pcs = felix->pcs[port];
-
-	if (!pcs)
-		return;
-
-	switch (pcs->interface) {
-	case PHY_INTERFACE_MODE_SGMII:
-	case PHY_INTERFACE_MODE_QSGMII:
-		vsc9959_pcs_an_restart_sgmii(pcs);
-		break;
-	case PHY_INTERFACE_MODE_USXGMII:
-		vsc9959_pcs_an_restart_usxgmii(pcs);
-		break;
-	default:
-		dev_err(ocelot->dev, "Invalid PCS interface type %s\n",
-			phy_modes(pcs->interface));
-		break;
-	}
-}
-
 /* We enable SGMII AN only when the PHY has managed = "in-band-status" in the
  * device tree. If we are in MLO_AN_PHY mode, we program directly state->speed
  * into the PCS, which is retrieved out-of-band over MDIO. This also has the
@@ -680,14 +772,11 @@ static void vsc9959_pcs_init_sgmii(struct phy_device *pcs,
 		phy_write(pcs, ENETC_PCS_LINK_TIMER2,
 			  ENETC_PCS_LINK_TIMER2_VAL);
 
-		phy_write(pcs, MII_BMCR, BMCR_ANRESTART | BMCR_ANENABLE);
+		phy_set_bits(pcs, MII_BMCR, BMCR_ANENABLE);
 	} else {
+		u16 if_mode = ENETC_PCS_IF_MODE_SGMII_EN;
 		int speed;
 
-		if (state->duplex == DUPLEX_HALF) {
-			phydev_err(pcs, "Half duplex not supported\n");
-			return;
-		}
 		switch (state->speed) {
 		case SPEED_1000:
 			speed = ENETC_PCS_SPEED_1000;
@@ -706,14 +795,11 @@ static void vsc9959_pcs_init_sgmii(struct phy_device *pcs,
 			return;
 		}
 
-		phy_write(pcs, ENETC_PCS_IF_MODE,
-			  ENETC_PCS_IF_MODE_SGMII_EN |
-			  ENETC_PCS_IF_MODE_SGMII_SPEED(speed));
+		if_mode |= ENETC_PCS_IF_MODE_SGMII_SPEED(speed);
+		if (state->duplex == DUPLEX_HALF)
+			if_mode |= ENETC_PCS_IF_MODE_DUPLEX_HALF;
 
-		/* Yes, not a mistake: speed is given by IF_MODE. */
-		phy_write(pcs, MII_BMCR, BMCR_RESET |
-					 BMCR_SPEED1000 |
-					 BMCR_FULLDPLX);
+		phy_clear_bits(pcs, MII_BMCR, BMCR_ANENABLE);
 	}
 }
 
@@ -738,18 +824,19 @@ static void vsc9959_pcs_init_2500basex(struct phy_device *pcs,
 				       unsigned int link_an_mode,
 				       const struct phylink_link_state *state)
 {
+	u16 if_mode = ENETC_PCS_IF_MODE_SGMII_SPEED(ENETC_PCS_SPEED_2500) |
+		      ENETC_PCS_IF_MODE_SGMII_EN;
+
 	if (link_an_mode == MLO_AN_INBAND) {
 		phydev_err(pcs, "AN not supported on 3.125GHz SerDes lane\n");
 		return;
 	}
 
-	phy_write(pcs, ENETC_PCS_IF_MODE,
-		  ENETC_PCS_IF_MODE_SGMII_EN |
-		  ENETC_PCS_IF_MODE_SGMII_SPEED(ENETC_PCS_SPEED_2500));
+	if (state->duplex == DUPLEX_HALF)
+		if_mode |= ENETC_PCS_IF_MODE_DUPLEX_HALF;
 
-	phy_write(pcs, MII_BMCR, BMCR_SPEED1000 |
-				 BMCR_FULLDPLX |
-				 BMCR_RESET);
+	phy_write(pcs, ENETC_PCS_IF_MODE, if_mode);
+	phy_clear_bits(pcs, MII_BMCR, BMCR_ANENABLE);
 }
 
 static void vsc9959_pcs_init_usxgmii(struct phy_device *pcs,
@@ -789,8 +876,11 @@ static void vsc9959_pcs_init(struct ocelot *ocelot, int port,
 	linkmode_set_bit_array(phy_basic_ports_array,
 			       ARRAY_SIZE(phy_basic_ports_array),
 			       pcs->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10baseT_Half_BIT, pcs->supported);
 	linkmode_set_bit(ETHTOOL_LINK_MODE_10baseT_Full_BIT, pcs->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Half_BIT, pcs->supported);
 	linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT, pcs->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Half_BIT, pcs->supported);
 	linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT, pcs->supported);
 	if (pcs->interface == PHY_INTERFACE_MODE_2500BASEX ||
 	    pcs->interface == PHY_INTERFACE_MODE_USXGMII)
@@ -953,8 +1043,7 @@ static int vsc9959_prevalidate_phy_mode(struct ocelot *ocelot, int port,
 					phy_interface_t phy_mode)
 {
 	switch (phy_mode) {
-	case PHY_INTERFACE_MODE_GMII:
-		/* Only supported on internal to-CPU ports */
+	case PHY_INTERFACE_MODE_INTERNAL:
 		if (port != 4 && port != 5)
 			return -ENOTSUPP;
 		return 0;
@@ -982,7 +1071,7 @@ static int vsc9959_mdio_bus_alloc(struct ocelot *ocelot)
 	struct device *dev = ocelot->dev;
 	resource_size_t imdio_base;
 	void __iomem *imdio_regs;
-	struct resource *res;
+	struct resource res;
 	struct enetc_hw *hw;
 	struct mii_bus *bus;
 	int port;
@@ -999,12 +1088,12 @@ static int vsc9959_mdio_bus_alloc(struct ocelot *ocelot)
 	imdio_base = pci_resource_start(felix->pdev,
 					felix->info->imdio_pci_bar);
 
-	res = felix->info->imdio_res;
-	res->flags = IORESOURCE_MEM;
-	res->start += imdio_base;
-	res->end += imdio_base;
+	memcpy(&res, felix->info->imdio_res, sizeof(res));
+	res.flags = IORESOURCE_MEM;
+	res.start += imdio_base;
+	res.end += imdio_base;
 
-	imdio_regs = devm_ioremap_resource(dev, res);
+	imdio_regs = devm_ioremap_resource(dev, &res);
 	if (IS_ERR(imdio_regs)) {
 		dev_err(dev, "failed to map internal MDIO registers\n");
 		return PTR_ERR(imdio_regs);
@@ -1087,14 +1176,17 @@ struct felix_info felix_info_vsc9959 = {
 	.ops			= &vsc9959_ops,
 	.stats_layout		= vsc9959_stats_layout,
 	.num_stats		= ARRAY_SIZE(vsc9959_stats_layout),
+	.vcap_is2_keys		= vsc9959_vcap_is2_keys,
+	.vcap_is2_actions	= vsc9959_vcap_is2_actions,
+	.vcap			= vsc9959_vcap_props,
 	.shared_queue_sz	= 128 * 1024,
+	.num_mact_rows		= 2048,
 	.num_ports		= 6,
 	.switch_pci_bar		= 4,
 	.imdio_pci_bar		= 0,
 	.mdio_bus_alloc		= vsc9959_mdio_bus_alloc,
 	.mdio_bus_free		= vsc9959_mdio_bus_free,
 	.pcs_init		= vsc9959_pcs_init,
-	.pcs_an_restart		= vsc9959_pcs_an_restart,
 	.pcs_link_state		= vsc9959_pcs_link_state,
 	.prevalidate_phy_mode	= vsc9959_prevalidate_phy_mode,
 };

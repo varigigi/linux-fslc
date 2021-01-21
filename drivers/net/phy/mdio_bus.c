@@ -8,6 +8,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
@@ -114,6 +115,46 @@ int mdiobus_unregister_device(struct mdio_device *mdiodev)
 	return 0;
 }
 EXPORT_SYMBOL(mdiobus_unregister_device);
+
+int fwnode_mdiobus_register_phy(struct mii_bus *bus,
+				struct fwnode_handle *child, u32 addr)
+{
+	struct phy_device *phy;
+	const char *cp;
+	bool is_c45;
+	u32 phy_id;
+	int rc;
+
+	rc = fwnode_property_read_string(child, "compatible", &cp);
+	is_c45 = !(rc || strcmp(cp, "ethernet-phy-ieee802.3-c45"));
+
+	if (is_c45 || fwnode_get_phy_id(child, &phy_id))
+		phy = get_phy_device(bus, addr, is_c45);
+	else
+		phy = phy_device_create(bus, addr, phy_id, 0, NULL);
+	if (IS_ERR(phy))
+		return PTR_ERR(phy);
+
+	phy->irq = bus->irq[addr];
+
+	/* Associate the fwnode with the device structure so it
+	 * can be looked up later.
+	 */
+	phy->mdio.dev.fwnode = child;
+
+	/* All data is now stored in the phy struct, so register it */
+	rc = phy_device_register(phy);
+	if (rc) {
+		phy_device_free(phy);
+		fwnode_handle_put(phy->mdio.dev.fwnode);
+		return rc;
+	}
+
+	dev_dbg(&bus->dev, "registered phy at address %i\n", addr);
+
+	return 0;
+}
+EXPORT_SYMBOL(fwnode_mdiobus_register_phy);
 
 struct phy_device *mdiobus_get_phy(struct mii_bus *bus, int addr)
 {
@@ -353,6 +394,60 @@ static int mdiobus_create_device(struct mii_bus *bus,
 }
 
 /**
+ * fwnode_mdiobus_register - Register mii_bus and create PHYs from fwnode
+ * @mdio: pointer to mii_bus structure
+ * @fwnode: pointer to fwnode of MDIO bus.
+ *
+ * This function registers the mii_bus structure and registers a phy_device
+ * for each child node of @fwnode.
+ */
+int fwnode_mdiobus_register(struct mii_bus *mdio, struct fwnode_handle *fwnode)
+{
+#ifdef CONFIG_ACPI
+	struct fwnode_handle *child;
+	unsigned long long addr;
+	acpi_status status;
+	int ret;
+#endif
+
+	if (is_of_node(fwnode)) {
+		return of_mdiobus_register(mdio, to_of_node(fwnode));
+	}
+#ifdef CONFIG_ACPI
+	if (is_acpi_node(fwnode)) {
+		/* Mask out all PHYs from auto probing. */
+		mdio->phy_mask = ~0;
+		ret = mdiobus_register(mdio);
+		if (ret)
+			return ret;
+
+		mdio->dev.fwnode = fwnode;
+	/* Loop over the child nodes and register a phy_device for each PHY */
+		fwnode_for_each_child_node(fwnode, child) {
+			status = acpi_evaluate_integer(ACPI_HANDLE_FWNODE(child),
+						       "_ADR", NULL, &addr);
+			if (ACPI_FAILURE(status)) {
+				pr_debug("_ADR returned %d\n", status);
+				continue;
+			}
+
+			if (addr < 0 || addr >= PHY_MAX_ADDR)
+				continue;
+
+			ret = fwnode_mdiobus_register_phy(mdio, child, addr);
+			if (ret == -ENODEV)
+				dev_err(&mdio->dev,
+					"MDIO device at address %lld is missing.\n",
+					addr);
+		}
+		return 0;
+	}
+#endif
+	return -EINVAL;
+}
+EXPORT_SYMBOL(fwnode_mdiobus_register);
+
+/**
  * __mdiobus_register - bring up all the PHYs on a given bus and attach them to bus
  * @bus: target mii_bus
  * @owner: module containing bus accessor functions
@@ -513,10 +608,24 @@ EXPORT_SYMBOL(mdiobus_free);
  */
 struct phy_device *mdiobus_scan(struct mii_bus *bus, int addr)
 {
-	struct phy_device *phydev;
+	struct phy_device *phydev = ERR_PTR(-ENODEV);
 	int err;
 
-	phydev = get_phy_device(bus, addr, false);
+	switch (bus->probe_capabilities) {
+	case MDIOBUS_NO_CAP:
+	case MDIOBUS_C22:
+		phydev = get_phy_device(bus, addr, false);
+		break;
+	case MDIOBUS_C45:
+		phydev = get_phy_device(bus, addr, true);
+		break;
+	case MDIOBUS_C22_C45:
+		phydev = get_phy_device(bus, addr, false);
+		if (IS_ERR(phydev))
+			phydev = get_phy_device(bus, addr, true);
+		break;
+	}
+
 	if (IS_ERR(phydev))
 		return phydev;
 

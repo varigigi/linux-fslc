@@ -121,8 +121,11 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_RBIER	0xa0
 #define ENETC_RBIER_RXTIE	BIT(0)
 #define ENETC_RBIDR	0xa4
-#define ENETC_RBICIR0	0xa8
-#define ENETC_RBICIR0_ICEN	BIT(31)
+#define ENETC_RBICR0	0xa8
+#define ENETC_RBICR0_ICEN		BIT(31)
+#define ENETC_RBICR0_ICPT_MASK		0x1ff
+#define ENETC_RBICR0_SET_ICPT(n)	((n) & ENETC_RBICR0_ICPT_MASK)
+#define ENETC_RBICR1	0xac
 
 /* TX BDR reg offsets */
 #define ENETC_TBMR	0
@@ -141,8 +144,11 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_TBIER	0xa0
 #define ENETC_TBIER_TXTIE	BIT(0)
 #define ENETC_TBIDR	0xa4
-#define ENETC_TBICIR0	0xa8
-#define ENETC_TBICIR0_ICEN	BIT(31)
+#define ENETC_TBICR0	0xa8
+#define ENETC_TBICR0_ICEN		BIT(31)
+#define ENETC_TBICR0_ICPT_MASK		0xf
+#define ENETC_TBICR0_SET_ICPT(n) ((ilog2(n) + 1) & ENETC_TBICR0_ICPT_MASK)
+#define ENETC_TBICR1	0xac
 
 #define ENETC_RTBLENR_LEN(n)	((n) & ~0x7)
 
@@ -446,8 +452,7 @@ union enetc_tx_bd {
 		__le16 frm_len;
 		union {
 			struct {
-				__le16 l3_csoff;
-				u8 l4_csoff;
+				u8 reserved[3];
 				u8 flags;
 			}; /* default layout */
 			__le32 lstatus;
@@ -469,38 +474,26 @@ union enetc_tx_bd {
 	} wb; /* writeback descriptor */
 };
 
-#define ENETC_TXBD_FLAGS_L4CS	BIT(0)
-#define ENETC_TXBD_FLAGS_W	BIT(2)
-#define ENETC_TXBD_FLAGS_CSUM	BIT(3)
-#define ENETC_TXBD_FLAGS_EX	BIT(6)
-#define ENETC_TXBD_FLAGS_F	BIT(7)
-#define ENETC_TXBD_STATS_WIN	BIT(7)
+enum enetc_txbd_flags {
+	ENETC_TXBD_FLAGS_RES0 = BIT(0), /* reserved */
+	ENETC_TXBD_FLAGS_TSE = BIT(1),
+	ENETC_TXBD_FLAGS_W = BIT(2),
+	ENETC_TXBD_FLAGS_RES3 = BIT(3), /* reserved */
+	ENETC_TXBD_FLAGS_TXSTART = BIT(4),
+	ENETC_TXBD_FLAGS_EX = BIT(6),
+	ENETC_TXBD_FLAGS_F = BIT(7)
+};
+
+#define ENETC_TXBD_STATUS_WIN	BIT(7)
 
 static inline void enetc_clear_tx_bd(union enetc_tx_bd *txbd)
 {
 	memset(txbd, 0, sizeof(*txbd));
 }
 
-/* L3 csum flags */
-#define ENETC_TXBD_L3_IPCS	BIT(7)
-#define ENETC_TXBD_L3_IPV6	BIT(15)
-
-#define ENETC_TXBD_L3_START_MASK	GENMASK(6, 0)
-#define ENETC_TXBD_L3_SET_HSIZE(val)	((((val) >> 2) & 0x7f) << 8)
-
 /* Extension flags */
 #define ENETC_TXBD_E_FLAGS_VLAN_INS	BIT(0)
 #define ENETC_TXBD_E_FLAGS_TWO_STEP_PTP	BIT(2)
-
-static inline __le16 enetc_txbd_l3_csoff(int start, int hdr_sz, u16 l3_flags)
-{
-	return cpu_to_le16(l3_flags | ENETC_TXBD_L3_SET_HSIZE(hdr_sz) |
-			   (start & ENETC_TXBD_L3_START_MASK));
-}
-
-/* L4 csum flags */
-#define ENETC_TXBD_L4_UDP	BIT(5)
-#define ENETC_TXBD_L4_TCP	BIT(6)
 
 #define enetc_tsn_is_enabled() IS_ENABLED(CONFIG_ENETC_TSN)
 
@@ -508,9 +501,6 @@ union enetc_rx_bd {
 	struct {
 		__le64 addr;
 		u8 reserved[8];
-#ifdef CONFIG_FSL_ENETC_HW_TIMESTAMPING
-		u8 reserved1[16];
-#endif
 	} w;
 	struct {
 		__le16 inet_csum;
@@ -525,11 +515,11 @@ union enetc_rx_bd {
 			};
 			__le32 lstatus;
 		};
-#ifdef CONFIG_FSL_ENETC_HW_TIMESTAMPING
+	} r;
+	struct {
 		__le32 tstamp;
 		u8 reserved[12];
-#endif
-	} r;
+	} ext;
 };
 
 #define ENETC_RXBD_LSTATUS_R	BIT(30)
@@ -614,22 +604,22 @@ struct enetc_msg_cmd_header {
 
 /* Common H/W utility functions */
 
-static inline void enetc_enable_rxvlan(struct enetc_hw *hw, int si_idx,
-				       bool en)
+static inline void enetc_bdr_enable_rxvlan(struct enetc_hw *hw, int idx,
+					   bool en)
 {
-	u32 val = enetc_rxbdr_rd(hw, si_idx, ENETC_RBMR);
+	u32 val = enetc_rxbdr_rd(hw, idx, ENETC_RBMR);
 
 	val = (val & ~ENETC_RBMR_VTE) | (en ? ENETC_RBMR_VTE : 0);
-	enetc_rxbdr_wr(hw, si_idx, ENETC_RBMR, val);
+	enetc_rxbdr_wr(hw, idx, ENETC_RBMR, val);
 }
 
-static inline void enetc_enable_txvlan(struct enetc_hw *hw, int si_idx,
-				       bool en)
+static inline void enetc_bdr_enable_txvlan(struct enetc_hw *hw, int idx,
+					   bool en)
 {
-	u32 val = enetc_txbdr_rd(hw, si_idx, ENETC_TBMR);
+	u32 val = enetc_txbdr_rd(hw, idx, ENETC_TBMR);
 
 	val = (val & ~ENETC_TBMR_VIH) | (en ? ENETC_TBMR_VIH : 0);
-	enetc_txbdr_wr(hw, si_idx, ENETC_TBMR, val);
+	enetc_txbdr_wr(hw, idx, ENETC_TBMR, val);
 }
 
 static inline void enetc_set_bdr_prio(struct enetc_hw *hw, int bdr_idx,
@@ -964,7 +954,7 @@ struct tgs_gcl_data {
 	__le32		bth;
 	__le32		ct;
 	__le32		cte;
-	struct gce	entry[0];
+	struct gce	entry[];
 };
 
 /* class 5, command 1 */
@@ -1029,6 +1019,15 @@ struct enetc_cbd {
 };
 
 #define ENETC_CLK  400000000ULL
+static inline u32 enetc_cycles_to_usecs(u32 cycles)
+{
+	return (u32)div_u64(cycles * 1000000ULL, ENETC_CLK);
+}
+
+static inline u32 enetc_usecs_to_cycles(u32 usecs)
+{
+	return (u32)div_u64(usecs * ENETC_CLK, 1000000ULL);
+}
 
 #define ENETC_PTCFPR(n)		(0x1910 + (n) * 4) /* n = [0 ..7] */
 #define ENETC_FPE		BIT(31)

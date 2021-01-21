@@ -22,6 +22,7 @@ enum {
 	DSA_NOTIFIER_MDB_DEL,
 	DSA_NOTIFIER_VLAN_ADD,
 	DSA_NOTIFIER_VLAN_DEL,
+	DSA_NOTIFIER_MTU,
 };
 
 /* DSA_NOTIFIER_AGEING_TIME */
@@ -33,6 +34,7 @@ struct dsa_notifier_ageing_time_info {
 /* DSA_NOTIFIER_BRIDGE_* */
 struct dsa_notifier_bridge_info {
 	struct net_device *br;
+	int tree_index;
 	int sw_index;
 	int port;
 };
@@ -59,6 +61,14 @@ struct dsa_notifier_vlan_info {
 	struct switchdev_trans *trans;
 	int sw_index;
 	int port;
+};
+
+/* DSA_NOTIFIER_MTU */
+struct dsa_notifier_mtu_info {
+	bool propagate_upstream;
+	int sw_index;
+	int port;
+	int mtu;
 };
 
 struct dsa_slave_priv {
@@ -104,25 +114,14 @@ static inline struct net_device *dsa_master_find_slave(struct net_device *dev,
 {
 	struct dsa_port *cpu_dp = dev->dsa_ptr;
 	struct dsa_switch_tree *dst = cpu_dp->dst;
-	struct dsa_switch *ds;
-	struct dsa_port *slave_port;
+	struct dsa_port *dp;
 
-	if (device < 0 || device >= DSA_MAX_SWITCHES)
-		return NULL;
+	list_for_each_entry(dp, &dst->ports, list)
+		if (dp->ds->index == device && dp->index == port &&
+		    dp->type == DSA_PORT_TYPE_USER)
+			return dp->slave;
 
-	ds = dst->ds[device];
-	if (!ds)
-		return NULL;
-
-	if (port < 0 || port >= ds->num_ports)
-		return NULL;
-
-	slave_port = &ds->ports[port];
-
-	if (unlikely(slave_port->type != DSA_PORT_TYPE_USER))
-		return NULL;
-
-	return slave_port->slave;
+	return NULL;
 }
 
 /* port.c */
@@ -138,6 +137,8 @@ int dsa_port_vlan_filtering(struct dsa_port *dp, bool vlan_filtering,
 			    struct switchdev_trans *trans);
 int dsa_port_ageing_time(struct dsa_port *dp, clock_t ageing_clock,
 			 struct switchdev_trans *trans);
+int dsa_port_mtu_change(struct dsa_port *dp, int new_mtu,
+			bool propagate_upstream);
 int dsa_port_fdb_add(struct dsa_port *dp, const unsigned char *addr,
 		     u16 vid);
 int dsa_port_fdb_del(struct dsa_port *dp, const unsigned char *addr,
@@ -186,6 +187,7 @@ extern const struct dsa_device_ops notag_netdev_ops;
 void dsa_slave_mii_bus_init(struct dsa_switch *ds);
 int dsa_slave_create(struct dsa_port *dp);
 void dsa_slave_destroy(struct net_device *slave_dev);
+bool dsa_slave_dev_check(const struct net_device *dev);
 int dsa_slave_suspend(struct net_device *slave_dev);
 int dsa_slave_resume(struct net_device *slave_dev);
 int dsa_slave_register_notifier(void);
@@ -211,4 +213,8 @@ dsa_slave_to_master(const struct net_device *dev)
 /* switch.c */
 int dsa_switch_register_notifier(struct dsa_switch *ds);
 void dsa_switch_unregister_notifier(struct dsa_switch *ds);
+
+/* dsa2.c */
+extern struct list_head dsa_tree_list;
+
 #endif

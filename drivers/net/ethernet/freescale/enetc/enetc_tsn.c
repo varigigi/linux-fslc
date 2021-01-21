@@ -9,8 +9,6 @@
 #include <linux/irqflags.h>
 #include <linux/preempt.h>
 
-static u32 get_ndev_speed(struct net_device *netdev);
-
 static int alloc_cbdr(struct enetc_si *si, struct enetc_cbd **curr_cbd)
 {
 	struct enetc_cbdr *ring = &si->cbd_ring;
@@ -127,50 +125,37 @@ u16 enetc_get_max_gcl_len(struct enetc_hw *hw)
 
 void enetc_pspeed_set(struct net_device *ndev)
 {
-	u32 speed, pspeed;
-	u32 difflag = 0;
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct phy_device *phydev = ndev->phydev;
+	u32 old_speed = priv->speed;
+	u32 speed, pspeed;
 
-	speed = get_ndev_speed(ndev);
-	pspeed = enetc_port_rd(&priv->si->hw, ENETC_PMR)
-		& ENETC_PMR_PSPEED_MASK;
+	if (phydev->speed == old_speed)
+		return;
+
+	speed = phydev->speed;
 	switch (speed) {
 	case SPEED_1000:
-		if (pspeed != ENETC_PMR_PSPEED_1000M) {
-			difflag = 1;
-			pspeed = ENETC_PMR_PSPEED_1000M;
-		}
+		pspeed = ENETC_PMR_PSPEED_1000M;
 		break;
 	case SPEED_2500:
-		if (pspeed != ENETC_PMR_PSPEED_2500M) {
-			difflag = 1;
-			pspeed = ENETC_PMR_PSPEED_2500M;
-		}
-
+		pspeed = ENETC_PMR_PSPEED_2500M;
 		break;
 	case SPEED_100:
-		if (pspeed != ENETC_PMR_PSPEED_100M) {
-			difflag = 1;
-			pspeed = ENETC_PMR_PSPEED_100M;
-		}
+		pspeed = ENETC_PMR_PSPEED_100M;
 		break;
 	case SPEED_10:
-		if (pspeed != ENETC_PMR_PSPEED_10M) {
-			difflag = 1;
-			pspeed = ENETC_PMR_PSPEED_10M;
-		}
-		break;
 	default:
-		netdev_err(ndev, "not support speed\n");
+		pspeed = ENETC_PMR_PSPEED_10M;
 	}
 
-	if (difflag) {
-		enetc_port_wr(&priv->si->hw, ENETC_PMR,
-			      (enetc_port_rd(&priv->si->hw, ENETC_PMR)
-			      & (~ENETC_PMR_PSPEED_MASK))
-			      | pspeed);
-	}
+	priv->speed = speed;
+	enetc_port_wr(&priv->si->hw, ENETC_PMR,
+		      (enetc_port_rd(&priv->si->hw, ENETC_PMR)
+		      & (~ENETC_PMR_PSPEED_MASK))
+		      | pspeed);
 }
+EXPORT_SYMBOL_GPL(enetc_pspeed_set);
 
 /* CBD Class 5: Time Gated Scheduling Gate Control List configuration
  * Descriptor - Long Format
@@ -197,8 +182,6 @@ int enetc_qbv_set(struct net_device *ndev, struct tsn_qbv_conf *admin_conf)
 		netdev_err(priv->si->ndev, "TSN device not registered!\n");
 		return -ENODEV;
 	}
-
-	enetc_pspeed_set(ndev);
 
 	gcl_len = admin_basic->control_list_length;
 	if (gcl_len > enetc_get_max_gcl_len(&priv->si->hw))
@@ -254,17 +237,8 @@ int enetc_qbv_set(struct net_device *ndev, struct tsn_qbv_conf *admin_conf)
 	gcl_config->atc = admin_basic->gate_states;
 	gcl_config->acl_len = cpu_to_le16(gcl_len);
 
-	if (!admin_basic->base_time) {
-		gcl_data->btl =
-			cpu_to_le32(enetc_rd(&priv->si->hw, ENETC_SICTR0));
-		gcl_data->bth =
-			cpu_to_le32(enetc_rd(&priv->si->hw, ENETC_SICTR1));
-	} else {
-		gcl_data->btl =
-			cpu_to_le32(lower_32_bits(admin_basic->base_time));
-		gcl_data->bth =
-			cpu_to_le32(upper_32_bits(admin_basic->base_time));
-	}
+	gcl_data->btl = cpu_to_le32(lower_32_bits(admin_basic->base_time));
+	gcl_data->bth = cpu_to_le32(upper_32_bits(admin_basic->base_time));
 
 	gcl_data->ct = cpu_to_le32(admin_basic->cycle_time);
 	gcl_data->cte = cpu_to_le32(admin_basic->cycle_time_extension);
@@ -1759,7 +1733,7 @@ static int enetc_set_cbs(struct net_device *ndev, u8 tc, u8 bw)
 	if (!ecbs)
 		return -ENOMEM;
 
-	port_transmit_rate = get_ndev_speed(si->ndev);
+	port_transmit_rate = priv->speed;
 	if (port_transmit_rate != ecbs->port_transmit_rate)
 		ecbs->port_transmit_rate = port_transmit_rate;
 	port_frame_max_size = ecbs->port_max_size_frame;
@@ -1833,6 +1807,9 @@ static int enetc_set_cbs(struct net_device *ndev, u8 tc, u8 bw)
 		cbs[tc].max_interfrence_size = port_frame_max_size * 8;
 
 	} else if (tc == tc_nums - 2) {
+		if (!cbs[tc + 1].send_slope)
+			return -1;
+
 		cbs[tc].max_interfrence_size = (port_frame_max_size
 				+ cbs[tc + 1].tc_max_sized_frame
 				+ port_frame_max_size * (cbs[tc + 1].idle_slope
@@ -1844,10 +1821,16 @@ static int enetc_set_cbs(struct net_device *ndev, u8 tc, u8 bw)
 			send_slope += cbs[i].send_slope;
 			max_interfrence_size += cbs[i].tc_max_sized_frame;
 		}
+		if (!send_slope)
+			return -1;
+
 		max_interfrence_size = ((u64)port_transmit_rate
 				* max_interfrence_size) / send_slope;
 		cbs[tc].max_interfrence_size = max_interfrence_size * 8;
 	}
+
+	if (!port_transmit_rate)
+		return -1;
 
 	cbs[tc].hi_credit = cbs[tc].max_interfrence_size * cbs[tc].bw / 100;
 	cbs[tc].lo_credit = cbs[tc].tc_max_sized_frame * (cbs[tc].send_slope
@@ -1894,33 +1877,6 @@ static int enetc_get_tsd(struct net_device *ndev, struct tsn_tsd_status *tts)
 	return 0;
 }
 
-static u32 get_ndev_speed(struct net_device *netdev)
-{
-	struct ethtool_link_ksettings ksettings;
-	int rc = -1;
-
-	if (netdev->ethtool_ops->get_link_ksettings) {
-		if (netdev->ethtool_ops->begin) {
-			rc = netdev->ethtool_ops->begin(netdev);
-			if (rc < 0)
-				return 0;
-		}
-
-		memset(&ksettings, 0, sizeof(ksettings));
-
-		if (!netdev->ethtool_ops->get_link_ksettings)
-			return 0;
-
-		rc = netdev->ethtool_ops->get_link_ksettings(netdev,
-							     &ksettings);
-
-		if (netdev->ethtool_ops->complete)
-			netdev->ethtool_ops->complete(netdev);
-	}
-
-	return (rc < 0) ? 0 : ksettings.base.speed;
-}
-
 static void enetc_cbs_init(struct enetc_si *si)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
@@ -1935,7 +1891,7 @@ static void enetc_cbs_init(struct enetc_si *si)
 	si->ecbs->port_max_size_frame = si->ndev->mtu + ETH_HLEN
 						+ VLAN_HLEN + ETH_FCS_LEN;
 	si->ecbs->tc_nums = tc_nums;
-	si->ecbs->port_transmit_rate = get_ndev_speed(si->ndev);
+	si->ecbs->port_transmit_rate = priv->speed;
 
 	/*This trick is used only for CFP*/
 	if (!si->ecbs->port_transmit_rate)

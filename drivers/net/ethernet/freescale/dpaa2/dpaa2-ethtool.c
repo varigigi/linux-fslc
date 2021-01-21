@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /* Copyright 2014-2016 Freescale Semiconductor Inc.
  * Copyright 2016 NXP
+ * Copyright 2020 NXP
  */
 
 #include <linux/net_tstamp.h>
@@ -43,9 +44,10 @@ static char dpaa2_ethtool_extras[][ETH_GSTRING_LEN] = {
 	"[drv] tx conf bytes",
 	"[drv] tx sg frames",
 	"[drv] tx sg bytes",
-	"[drv] tx realloc frames",
 	"[drv] rx sg frames",
 	"[drv] rx sg bytes",
+	"[drv] tx converted sg frames",
+	"[drv] tx converted sg bytes",
 	"[drv] enqueue portal busy",
 	/* Channel stats */
 	"[drv] dequeue portal busy",
@@ -662,7 +664,7 @@ static int do_cls_rule(struct net_device *net_dev,
 			err = dpni_remove_fs_entry(priv->mc_io, 0,
 						   priv->mc_token, i,
 						   &rule_cfg);
-		if (err)
+		if (err || priv->dpni_attrs.options & DPNI_OPT_SHARED_FS)
 			break;
 	}
 
@@ -814,7 +816,8 @@ static int dpaa2_eth_get_ts_info(struct net_device *dev,
 	info->phc_index = dpaa2_phc_index;
 
 	info->tx_types = (1 << HWTSTAMP_TX_OFF) |
-			 (1 << HWTSTAMP_TX_ON);
+			 (1 << HWTSTAMP_TX_ON) |
+			 (1 << HWTSTAMP_TX_ONESTEP_SYNC);
 
 	info->rx_filters = (1 << HWTSTAMP_FILTER_NONE) |
 			   (1 << HWTSTAMP_FILTER_ALL);

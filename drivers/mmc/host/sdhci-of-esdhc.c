@@ -4,6 +4,7 @@
  *
  * Copyright (c) 2007, 2010, 2012 Freescale Semiconductor, Inc.
  * Copyright (c) 2009 MontaVista Software, Inc.
+ * Copyright 2020 NXP
  *
  * Authors: Xiaobo Xie <X.Xie@freescale.com>
  *	    Anton Vorontsov <avorontsov@ru.mvista.com>
@@ -19,8 +20,10 @@
 #include <linux/clk.h>
 #include <linux/ktime.h>
 #include <linux/dma-mapping.h>
+#include <linux/iopoll.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
+#include <linux/acpi.h>
 #include "sdhci-pltfm.h"
 #include "sdhci-esdhc.h"
 
@@ -70,6 +73,14 @@ static const struct of_device_id sdhci_esdhc_of_match[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sdhci_esdhc_of_match);
+
+#ifdef CONFIG_ACPI
+static const struct acpi_device_id sdhci_esdhc_ids[] = {
+	{"NXP0003" },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, sdhci_esdhc_ids);
+#endif
 
 struct sdhci_esdhc {
 	u8 vendor_ver;
@@ -172,6 +183,9 @@ static u16 esdhc_readw_fixup(struct sdhci_host *host,
 	struct sdhci_esdhc *esdhc = sdhci_pltfm_priv(pltfm_host);
 	u16 ret;
 	int shift = (spec_reg & 0x2) * 8;
+
+	if (spec_reg == SDHCI_TRANSFER_MODE)
+		return pltfm_host->xfer_mode_shadow;
 
 	if (spec_reg == SDHCI_HOST_VERSION)
 		ret = value & 0xffff;
@@ -527,6 +541,12 @@ static int esdhc_of_enable_dma(struct sdhci_host *host)
 
 	value = sdhci_readl(host, ESDHC_DMA_SYSCTL);
 
+	if (!dev->of_node) {
+		value |= ESDHC_DMA_SNOOP;
+		sdhci_writel(host, value, ESDHC_DMA_SYSCTL);
+		return 0;
+	}
+
 	if (of_dma_is_coherent(dev->of_node))
 		value |= ESDHC_DMA_SNOOP;
 	else
@@ -705,6 +725,21 @@ static void esdhc_of_set_clock(struct sdhci_host *host, unsigned int clock)
 		if (host->mmc->actual_clock == MMC_HS200_MAX_DTR)
 			temp |= ESDHC_DLL_FREQ_SEL;
 		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+
+		temp |= ESDHC_DLL_RESET;
+		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+		udelay(1);
+		temp &= ~ESDHC_DLL_RESET;
+		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+
+		/* Wait max 20 ms */
+		if (read_poll_timeout(sdhci_readl, temp,
+				      temp & ESDHC_DLL_STS_SLV_LOCK,
+				      10, 20000, false,
+				      host, ESDHC_DLLSTAT0))
+			pr_err("%s: timeout for delay chain lock.\n",
+			       mmc_hostname(host->mmc));
+
 		temp = sdhci_readl(host, ESDHC_TBCTL);
 		sdhci_writel(host, temp | ESDHC_HS400_WNDW_ADJUST, ESDHC_TBCTL);
 
@@ -1116,6 +1151,40 @@ static int esdhc_execute_tuning(struct mmc_host *mmc, u32 opcode)
 static void esdhc_set_uhs_signaling(struct sdhci_host *host,
 				   unsigned int timing)
 {
+	u32 val;
+
+	/*
+	 * There are specific registers setting for HS400 mode.
+	 * Clean all of them if controller is in HS400 mode to
+	 * exit HS400 mode before re-setting any speed mode.
+	 */
+	val = sdhci_readl(host, ESDHC_TBCTL);
+	if (val & ESDHC_HS400_MODE) {
+		val = sdhci_readl(host, ESDHC_SDTIMNGCTL);
+		val &= ~ESDHC_FLW_CTL_BG;
+		sdhci_writel(host, val, ESDHC_SDTIMNGCTL);
+
+		val = sdhci_readl(host, ESDHC_SDCLKCTL);
+		val &= ~ESDHC_CMD_CLK_CTL;
+		sdhci_writel(host, val, ESDHC_SDCLKCTL);
+
+		esdhc_clock_enable(host, false);
+		val = sdhci_readl(host, ESDHC_TBCTL);
+		val &= ~ESDHC_HS400_MODE;
+		sdhci_writel(host, val, ESDHC_TBCTL);
+		esdhc_clock_enable(host, true);
+
+		val = sdhci_readl(host, ESDHC_DLLCFG0);
+		val &= ~(ESDHC_DLL_ENABLE | ESDHC_DLL_FREQ_SEL);
+		sdhci_writel(host, val, ESDHC_DLLCFG0);
+
+		val = sdhci_readl(host, ESDHC_TBCTL);
+		val &= ~ESDHC_HS400_WNDW_ADJUST;
+		sdhci_writel(host, val, ESDHC_TBCTL);
+
+		esdhc_tuning_block_enable(host, false);
+	}
+
 	if (timing == MMC_TIMING_MMC_HS400)
 		esdhc_tuning_block_enable(host, true);
 	else
@@ -1241,6 +1310,8 @@ static struct soc_device_attribute soc_fixup_sdhc_clkdivs[] = {
 
 static struct soc_device_attribute soc_unreliable_pulse_detection[] = {
 	{ .family = "QorIQ LX2160A", .revision = "1.0", },
+	{ .family = "QorIQ LX2160A", .revision = "2.0", },
+	{ .family = "QorIQ LS1028A", .revision = "1.0", },
 	{ },
 };
 
@@ -1284,31 +1355,46 @@ static void esdhc_init(struct platform_device *pdev, struct sdhci_host *host)
 	if (of_device_is_compatible(np, "fsl,p2020-esdhc"))
 		esdhc->quirk_delay_before_data_reset = true;
 
-	clk = of_clk_get(np, 0);
-	if (!IS_ERR(clk)) {
-		/*
-		 * esdhc->peripheral_clock would be assigned with a value
-		 * which is eSDHC base clock when use periperal clock.
-		 * For some platforms, the clock value got by common clk
-		 * API is peripheral clock while the eSDHC base clock is
-		 * 1/2 peripheral clock.
-		 */
-		if (of_device_is_compatible(np, "fsl,ls1046a-esdhc") ||
-		    of_device_is_compatible(np, "fsl,ls1028a-esdhc"))
-			esdhc->peripheral_clock = clk_get_rate(clk) / 2;
-		else
-			esdhc->peripheral_clock = clk_get_rate(clk);
+	if (np) {
+		clk = of_clk_get(np, 0);
+		if (!IS_ERR(clk)) {
+			/*
+			 * esdhc->peripheral_clock would be assigned with a
+			 * value which is eSDHC base clock when use periperal
+			 * clock.
+			 * For some platforms, the clock value got by common clk
+			 * API is peripheral clock while the eSDHC base clock is
+			 * 1/2 peripheral clock.
+			 */
+			if (of_device_is_compatible(np, "fsl,ls1046a-esdhc") ||
+			    of_device_is_compatible(np, "fsl,ls1028a-esdhc") ||
+			    of_device_is_compatible(np, "fsl,ls1088a-esdhc"))
+				esdhc->peripheral_clock = clk_get_rate(clk) / 2;
+			else
+				esdhc->peripheral_clock = clk_get_rate(clk);
 
-		clk_put(clk);
+			clk_put(clk);
+		}
+	} else {
+		device_property_read_u32(&pdev->dev, "clock-frequency",
+					 &esdhc->peripheral_clock);
 	}
 
-	if (esdhc->peripheral_clock) {
-		esdhc_clock_enable(host, false);
-		val = sdhci_readl(host, ESDHC_DMA_SYSCTL);
+	esdhc_clock_enable(host, false);
+	val = sdhci_readl(host, ESDHC_DMA_SYSCTL);
+	/*
+	 * This bit needs to configure once in probe, and
+	 * SDHCI_RESET_ALL is not able to reset it.
+	 * Make sure configure right reference clock source by
+	 * set this bit to 1 or 0, to override the different
+	 * value which may be configured in bootloader.
+	 */
+	if (esdhc->peripheral_clock)
 		val |= ESDHC_PERIPHERAL_CLK_SEL;
-		sdhci_writel(host, val, ESDHC_DMA_SYSCTL);
-		esdhc_clock_enable(host, true);
-	}
+	else
+		val &= ~ESDHC_PERIPHERAL_CLK_SEL;
+	sdhci_writel(host, val, ESDHC_DMA_SYSCTL);
+	esdhc_clock_enable(host, true);
 }
 
 static int esdhc_hs400_prepare_ddr(struct mmc_host *mmc)
@@ -1327,7 +1413,7 @@ static int sdhci_esdhc_probe(struct platform_device *pdev)
 
 	np = pdev->dev.of_node;
 
-	if (of_property_read_bool(np, "little-endian"))
+	if (device_property_read_bool(&pdev->dev, "little-endian"))
 		host = sdhci_pltfm_init(pdev, &sdhci_esdhc_le_pdata,
 					sizeof(struct sdhci_esdhc));
 	else
@@ -1395,7 +1481,7 @@ static int sdhci_esdhc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	mmc_of_parse_voltage(np, &host->ocr_mask);
+	mmc_parse_voltage(&pdev->dev, &host->ocr_mask);
 
 	ret = sdhci_add_host(host);
 	if (ret)
@@ -1411,6 +1497,9 @@ static struct platform_driver sdhci_esdhc_driver = {
 	.driver = {
 		.name = "sdhci-esdhc",
 		.of_match_table = sdhci_esdhc_of_match,
+#ifdef CONFIG_ACPI
+		.acpi_match_table = sdhci_esdhc_ids,
+#endif
 		.pm = &esdhc_of_dev_pm_ops,
 	},
 	.probe = sdhci_esdhc_probe,
