@@ -2027,7 +2027,7 @@ static int __maybe_unused flexcan_suspend(struct device *device)
 {
 	struct net_device *dev = dev_get_drvdata(device);
 	struct flexcan_priv *priv = netdev_priv(dev);
-	int err;
+	int err = 0;
 
 	if (netif_running(dev)) {
 		/* if wakeup is enabled, enter stop mode
@@ -2039,9 +2039,7 @@ static int __maybe_unused flexcan_suspend(struct device *device)
 			if (err)
 				return err;
 		} else {
-			flexcan_chip_stop(dev);
-
-			err = pm_runtime_force_suspend(device);
+			err = flexcan_chip_disable(priv);
 			if (err)
 				return err;
 
@@ -2052,14 +2050,14 @@ static int __maybe_unused flexcan_suspend(struct device *device)
 	}
 	priv->can.state = CAN_STATE_SLEEPING;
 
-	return 0;
+	return err;
 }
 
 static int __maybe_unused flexcan_resume(struct device *device)
 {
 	struct net_device *dev = dev_get_drvdata(device);
 	struct flexcan_priv *priv = netdev_priv(dev);
-	int err;
+	int err = 0;
 
 	priv->can.state = CAN_STATE_ERROR_ACTIVE;
 	if (netif_running(dev)) {
@@ -2072,18 +2070,11 @@ static int __maybe_unused flexcan_resume(struct device *device)
 				return err;
 		} else {
 			pinctrl_pm_select_default_state(device);
-
-			err = pm_runtime_force_resume(device);
-			if (err)
-				return err;
-
-			err = flexcan_chip_start(dev);
-			if (err)
-				return err;
+			err = flexcan_chip_enable(priv);
 		}
 	}
 
-	return 0;
+	return err;
 }
 
 static int __maybe_unused flexcan_runtime_suspend(struct device *device)
@@ -2109,8 +2100,18 @@ static int __maybe_unused flexcan_noirq_suspend(struct device *device)
 	struct net_device *dev = dev_get_drvdata(device);
 	struct flexcan_priv *priv = netdev_priv(dev);
 
-	if (netif_running(dev) && device_may_wakeup(device))
-		flexcan_enable_wakeup_irq(priv, true);
+	if (netif_running(dev)) {
+		int err;
+
+		if (device_may_wakeup(device))
+			flexcan_enable_wakeup_irq(priv, true);
+
+		err = pm_runtime_force_suspend(device);
+		if (err)
+			return err;
+
+		pinctrl_pm_select_sleep_state(device);
+	}
 
 	return 0;
 }
@@ -2120,8 +2121,18 @@ static int __maybe_unused flexcan_noirq_resume(struct device *device)
 	struct net_device *dev = dev_get_drvdata(device);
 	struct flexcan_priv *priv = netdev_priv(dev);
 
-	if (netif_running(dev) && device_may_wakeup(device))
-		flexcan_enable_wakeup_irq(priv, false);
+	if (netif_running(dev)) {
+		int err;
+
+		pinctrl_pm_select_default_state(device);
+
+		err = pm_runtime_force_resume(device);
+		if (err)
+			return err;
+
+		if (device_may_wakeup(device))
+			flexcan_enable_wakeup_irq(priv, false);
+	}
 
 	return 0;
 }
