@@ -354,15 +354,15 @@ MODULE_DEVICE_TABLE(of, lpuart_dt_ids);
 static void lpuart_dma_tx_complete(void *arg);
 static int lpuart_sched_rx_dma(struct lpuart_port *sport);
 
-static inline bool is_imx7ulp_lpuart(struct lpuart_port *sport)
-{
-	return sport->devtype == IMX7ULP_LPUART;
-}
-
 static inline bool is_layerscape_lpuart(struct lpuart_port *sport)
 {
 	return (sport->devtype == LS1021A_LPUART ||
 		sport->devtype == LS1028A_LPUART);
+}
+
+static inline bool is_imx7ulp_lpuart(struct lpuart_port *sport)
+{
+	return sport->devtype == IMX7ULP_LPUART;
 }
 
 static inline bool is_imx8qxp_lpuart(struct lpuart_port *sport)
