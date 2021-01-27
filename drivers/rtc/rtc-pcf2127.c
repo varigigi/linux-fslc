@@ -230,10 +230,8 @@ static int pcf2127_nvmem_read(void *priv, unsigned int offset,
 	if (ret)
 		return ret;
 
-	ret = regmap_bulk_read(pcf2127->regmap, PCF2127_REG_RAM_RD_CMD,
-			       val, bytes);
-
-	return ret ?: bytes;
+	return regmap_bulk_read(pcf2127->regmap, PCF2127_REG_RAM_RD_CMD,
+				val, bytes);
 }
 
 static int pcf2127_nvmem_write(void *priv, unsigned int offset,
@@ -248,10 +246,8 @@ static int pcf2127_nvmem_write(void *priv, unsigned int offset,
 	if (ret)
 		return ret;
 
-	ret = regmap_bulk_write(pcf2127->regmap, PCF2127_REG_RAM_WRT_CMD,
-				val, bytes);
-
-	return ret ?: bytes;
+	return regmap_bulk_write(pcf2127->regmap, PCF2127_REG_RAM_WRT_CMD,
+				 val, bytes);
 }
 
 /* watchdog driver */
@@ -329,6 +325,7 @@ static int pcf2127_watchdog_init(struct device *dev, struct pcf2127 *pcf2127)
 	if (!IS_ENABLED(CONFIG_WATCHDOG) ||
 	    !device_property_read_bool(dev, "has-watchdog"))
 		return 0;
+
 	pcf2127->wdd.parent = dev;
 	pcf2127->wdd.info = &pcf2127_wdt_info;
 	pcf2127->wdd.ops = &pcf2127_watchdog_ops;
@@ -358,9 +355,7 @@ static int pcf2127_watchdog_init(struct device *dev, struct pcf2127 *pcf2127)
 		return ret;
 	}
 
-	ret = devm_watchdog_register_device(dev, &pcf2127->wdd);
-	if (ret)
-		return ret;
+	return devm_watchdog_register_device(dev, &pcf2127->wdd);
 }
 
 /* sysfs interface */
