@@ -592,7 +592,6 @@ static struct fwnode_handle *find_dpmac_node(struct device *dev,
 					     u16 dpmac_id)
 {
 	struct fwnode_handle *parent, *child  = NULL;
-	struct device_node *mc_node = dev->of_node;
 	struct device_node *dpmacs = NULL;
 	int err;
 	u32 id;
