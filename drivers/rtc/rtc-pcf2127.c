@@ -325,6 +325,7 @@ static int pcf2127_watchdog_init(struct device *dev, struct pcf2127 *pcf2127)
 	if (!IS_ENABLED(CONFIG_WATCHDOG) ||
 	    !device_property_read_bool(dev, "has-watchdog"))
 		return 0;
+
 	pcf2127->wdd.parent = dev;
 	pcf2127->wdd.info = &pcf2127_wdt_info;
 	pcf2127->wdd.ops = &pcf2127_watchdog_ops;
@@ -354,9 +355,7 @@ static int pcf2127_watchdog_init(struct device *dev, struct pcf2127 *pcf2127)
 		return ret;
 	}
 
-	ret = devm_watchdog_register_device(dev, &pcf2127->wdd);
-	if (ret)
-		return ret;
+	return devm_watchdog_register_device(dev, &pcf2127->wdd);
 }
 
 /* sysfs interface */
