@@ -218,7 +218,7 @@ done:
 #include <linux/phy.h>
 
 #ifdef CONFIG_FSL_DPAA2_MAC_USERSPACE_ACCESS
-static int dpaa2_mac_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+static int __maybe_unused dpaa2_mac_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct mii_ioctl_data *data = if_mii(ifr);
 
