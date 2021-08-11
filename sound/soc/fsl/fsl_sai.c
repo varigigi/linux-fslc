@@ -1138,14 +1138,17 @@ static int fsl_sai_probe(struct platform_device *pdev)
 	if (sai->soc_data->use_imx_pcm) {
 		ret = imx_pcm_dma_init(pdev, IMX_SAI_DMABUF_SIZE);
 		if (ret)
-			goto err_pm_disable;
+			goto err_snd_soc_unregister;
 	} else {
 		ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
 		if (ret)
-			goto err_pm_disable;
+			goto err_snd_soc_unregister;
 	}
 
 	return ret;
+
+err_snd_soc_unregister:
+	snd_soc_unregister_component(&pdev->dev);
 
 err_pm_disable:
 	pm_runtime_disable(&pdev->dev);
